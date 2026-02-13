@@ -14,6 +14,7 @@ pub enum VaultStatus {
     Finished,
 }
 
+// Check escrow isFinished in each fn
 #[program]
 pub mod reclaim {
 
@@ -94,8 +95,11 @@ pub mod reclaim {
         //     ErrorCode::Unauthorized
         // );
 
+        // Error check that escrow is finished or not.
+
         let clock = Clock::get()?;
         ctx.accounts.escrow_vault.last_check_in = clock.unix_timestamp;
+        ctx.accounts.escrow_vault.status = VaultStatus::Active;
 
         Ok(())
     }
