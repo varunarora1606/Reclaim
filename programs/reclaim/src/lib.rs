@@ -7,19 +7,12 @@ use anchor_spl::{
 
 declare_id!("D6KsfpptWHAWd6YUSeCMokhk2ESGxMPbP2qjGF7F7HE");
 
-#[derive(AnchorDeserialize, AnchorSerialize, Clone, Copy, PartialEq, Eq)]
-pub enum VaultStatus {
-    Active,
-    Claimable,
-    Finished,
-}
-
 // Check escrow isFinished in each fn
 #[program]
 pub mod reclaim {
 
     use anchor_lang::system_program::{transfer, Transfer};
-    use anchor_spl::token::{Burn, MintTo, burn, mint_to};
+    use anchor_spl::token::{burn, mint_to, Burn, MintTo};
 
     use super::*;
 
@@ -51,10 +44,15 @@ pub mod reclaim {
         let escrow = &mut ctx.accounts.escrow_vault;
         let global = &mut ctx.accounts.global_state;
 
-        // require!(
-        //     escrow.owner == ctx.accounts.owner.key(),
-        //     ErrorCode::Unauthorised
-        // );
+        require!(
+            escrow.owner == ctx.accounts.owner.key(),
+            ErrorCode::InvalidEscrowOwner
+        );
+
+        require!(
+            escrow.status != VaultStatus::Finished,
+            ErrorCode::EscrowAlreadyFinished
+        );
 
         // Transfer SOL to sol_vault
         transfer(
@@ -86,20 +84,23 @@ pub mod reclaim {
 
         escrow.shares += shares;
         global.total_shares += shares;
+        reset_last_check_in(&mut ctx.accounts.escrow_vault)?;
+
         Ok(())
     }
 
     pub fn check_in(ctx: Context<CheckIn>) -> Result<()> {
-        // require!(
-        //     ctx.accounts.escrow_vault.owner == ctx.accounts.owner.key(),
-        //     ErrorCode::Unauthorized
-        // );
+        require!(
+            ctx.accounts.escrow_vault.owner == ctx.accounts.owner.key(),
+            ErrorCode::InvalidEscrowOwner
+        );
 
-        // Error check that escrow is finished or not.
+        require!(
+            ctx.accounts.escrow_vault.status != VaultStatus::Finished,
+            ErrorCode::EscrowAlreadyFinished
+        );
 
-        let clock = Clock::get()?;
-        ctx.accounts.escrow_vault.last_check_in = clock.unix_timestamp;
-        ctx.accounts.escrow_vault.status = VaultStatus::Active;
+        reset_last_check_in(&mut ctx.accounts.escrow_vault)?;
 
         Ok(())
     }
@@ -107,10 +108,10 @@ pub mod reclaim {
     pub fn redeem_token(ctx: Context<RedeemToken>, shares: u64) -> Result<()> {
         let global = &mut ctx.accounts.global_state;
 
-        // require!(
-        //     ctx.accounts.token_account.amount >= shares,
-        //     ErrorCode::InsufficientBalance
-        // );
+        require!(
+            ctx.accounts.token_account.amount >= shares,
+            ErrorCode::InsufficientTokenBalance
+        );
 
         // Burn token
         burn(
@@ -149,15 +150,15 @@ pub mod reclaim {
         let clock = Clock::get()?;
         let escrow_vault = &mut ctx.accounts.escrow_vault;
 
-        // require!(
-        //     escrow_vault.beneficiary == ctx.accounts.beneficiary.key(),
-        //     ErrorCode::InvalidBeneficiary
-        // );
+        require!(
+            escrow_vault.beneficiary == ctx.accounts.beneficiary.key(),
+            ErrorCode::InvalidBeneficiary
+        );
 
-        // require!(
-        //     escrow_vault.last_check_in + escrow_vault.inactivity_period < clock.unix_timestamp,
-        //     ErrorCode::InactivityPeriodNotPassed
-        // );
+        require!(
+            escrow_vault.last_check_in + escrow_vault.inactivity_period < clock.unix_timestamp,
+            ErrorCode::InactivityPeriodNotPassed
+        );
 
         let shares = escrow_vault.shares.min(ctx.accounts.token_account.amount);
 
@@ -194,7 +195,13 @@ pub mod reclaim {
         ctx.accounts.global_state.total_shares -= shares;
         Ok(())
     }
+}
 
+pub fn reset_last_check_in(escrow: &mut Account<EscrowVault>) -> Result<()> {
+    let clock = Clock::get()?;
+    escrow.last_check_in = clock.unix_timestamp;
+    escrow.status = VaultStatus::Active;
+    Ok(())
 }
 
 #[account]
@@ -329,14 +336,19 @@ pub struct ClaimInheritaince<'info> {
     pub system_program: Program<'info, System>,
 }
 
+#[derive(AnchorDeserialize, AnchorSerialize, Clone, Copy, PartialEq, Eq)]
+pub enum VaultStatus {
+    Active,
+    Claimable,
+    Finished,
+}
+
 #[error_code]
 pub enum ErrorCode {
-
     #[msg("Invalid Amount")]
     InvalidAmount,
 
-     // ───────────── Escrow / Vault ─────────────
-
+    // ───────────── Escrow / Vault ─────────────
     #[msg("Escrow vault is not active")]
     EscrowNotActive,
 
@@ -354,9 +366,8 @@ pub enum ErrorCode {
 
     #[msg("Invalid beneficiary")]
     InvalidBeneficiary,
-    
-    // ───────────── Deposits ─────────────
 
+    // ───────────── Deposits ─────────────
     #[msg("Deposit amount must be greater than zero")]
     InvalidDepositAmount,
 
@@ -364,12 +375,10 @@ pub enum ErrorCode {
     InsufficientSolBalance,
 
     // ───────────── Tokens ─────────────
-
     #[msg("Insufficient token balance")]
     InsufficientTokenBalance,
 
     // ───────────── Redemption ─────────────
-
     #[msg("Redemption is not allowed in current vault status")]
     RedemptionNotAllowed,
 }
