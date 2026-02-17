@@ -24,7 +24,8 @@ pub mod reclaim {
     }
 
     pub fn create_escrow(ctx: Context<CreateEscrow>, inactivity_period: i64) -> Result<()> {
-        // msg!("Greetings from: {:?}", ctx.program_id);
+        require!(inactivity_period > 0, ErrorCode::InvalidInactivityPeriod);
+
         let clock = Clock::get()?;
         let escrow = &mut ctx.accounts.escrow_vault;
         escrow.owner = ctx.accounts.owner.key();
@@ -358,6 +359,9 @@ pub enum VaultStatus {
 pub enum ErrorCode {
     #[msg("Invalid Amount")]
     InvalidAmount,
+
+    #[msg("Inactivity period should be greater than 0")]
+    InvalidInactivityPeriod,
 
     // ───────────── Escrow / Vault ─────────────
     #[msg("Escrow vault is not active")]
