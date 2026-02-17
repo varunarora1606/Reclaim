@@ -3,16 +3,14 @@ use anchor_spl::{
     associated_token::AssociatedToken,
     token::{Mint, Token, TokenAccount},
 };
-// use anchor_lang::solana_program::clock::Clock;
 
 declare_id!("D6KsfpptWHAWd6YUSeCMokhk2ESGxMPbP2qjGF7F7HE");
 
-// Check escrow isFinished in each fn
 #[program]
 pub mod reclaim {
 
     use anchor_lang::system_program::{transfer, Transfer};
-    use anchor_spl::token::{burn, mint_to, Burn, MintTo};
+    use anchor_spl::token::{approve, burn, mint_to, Approve, Burn, MintTo};
 
     use super::*;
 
@@ -34,6 +32,7 @@ pub mod reclaim {
         escrow.last_check_in = clock.unix_timestamp;
         escrow.inactivity_period = inactivity_period;
         escrow.status = VaultStatus::Active;
+        escrow.shares = 0;
         escrow.bump = ctx.bumps.escrow_vault;
         Ok(())
     }
@@ -74,7 +73,7 @@ pub mod reclaim {
                 ctx.accounts.token_program.to_account_info(),
                 MintTo {
                     mint: ctx.accounts.token_mint.to_account_info(),
-                    to: ctx.accounts.token_account.to_account_info(),
+                    to: ctx.accounts.associated_token_account.to_account_info(),
                     authority: global.to_account_info(),
                 },
                 signer,
@@ -84,6 +83,19 @@ pub mod reclaim {
 
         escrow.shares += shares;
         global.total_shares += shares;
+
+        // Delegate token to respective EscrowVault
+        approve(
+            CpiContext::new(
+                ctx.accounts.token_program.to_account_info(),
+                Approve {
+                    to: ctx.accounts.associated_token_account.to_account_info(),
+                    delegate: escrow.to_account_info(),
+                    authority: ctx.accounts.owner.to_account_info(),
+                },
+            ),
+            escrow.shares,
+        )?;
         reset_last_check_in(&mut ctx.accounts.escrow_vault)?;
 
         Ok(())
@@ -106,10 +118,11 @@ pub mod reclaim {
     }
 
     pub fn redeem_token(ctx: Context<RedeemToken>, shares: u64) -> Result<()> {
+        // Update lastcheckin if escrow account exist.
         let global = &mut ctx.accounts.global_state;
 
         require!(
-            ctx.accounts.token_account.amount >= shares,
+            ctx.accounts.associated_token_account.amount >= shares,
             ErrorCode::InsufficientTokenBalance
         );
 
@@ -120,26 +133,18 @@ pub mod reclaim {
                 Burn {
                     authority: ctx.accounts.owner.to_account_info(),
                     mint: ctx.accounts.token_mint.to_account_info(),
-                    from: ctx.accounts.token_account.to_account_info(),
+                    from: ctx.accounts.associated_token_account.to_account_info(),
                 },
             ),
             shares,
         )?;
-
-        let signer: &[&[&[u8]]] = &[&[b"sol_vault", &[ctx.bumps.sol_vault]]];
 
         // Transfer SOL: sol_vault -> owner
-        transfer(
-            CpiContext::new_with_signer(
-                ctx.accounts.system_program.to_account_info(),
-                Transfer {
-                    from: ctx.accounts.sol_vault.to_account_info(),
-                    to: ctx.accounts.owner.to_account_info(),
-                },
-                signer,
-            ),
-            shares,
-        )?;
+        let sol_vault = &mut ctx.accounts.sol_vault.to_account_info();
+        let owner = &mut ctx.accounts.owner.to_account_info();
+
+        **sol_vault.try_borrow_mut_lamports()? -= shares;
+        **owner.try_borrow_mut_lamports()? += shares;
 
         global.total_shares -= shares;
 
@@ -160,35 +165,36 @@ pub mod reclaim {
             ErrorCode::InactivityPeriodNotPassed
         );
 
-        let shares = escrow_vault.shares.min(ctx.accounts.token_account.amount);
+        let shares = escrow_vault
+            .shares
+            .min(ctx.accounts.associated_token_account.amount);
+
+        let signer: &[&[&[u8]]] = &[&[
+            b"escrow_vault",
+            ctx.accounts.escrow_owner.key.as_ref(),
+            &[escrow_vault.bump],
+        ]];
 
         // Burn escrow_owner token (quantity = shares)
         burn(
-            CpiContext::new(
+            CpiContext::new_with_signer(
                 ctx.accounts.token_program.to_account_info(),
                 Burn {
                     mint: ctx.accounts.token_mint.to_account_info(),
-                    from: ctx.accounts.token_account.to_account_info(),
-                    authority: ctx.accounts.escrow_owner.to_account_info(),
-                },
-            ),
-            shares,
-        )?;
-
-        let signer: &[&[&[u8]]] = &[&[b"sol_vault", &[ctx.bumps.sol_vault]]];
-
-        // Tranfer sol: sol_vault -> beneficiary
-        transfer(
-            CpiContext::new_with_signer(
-                ctx.accounts.system_program.to_account_info(),
-                Transfer {
-                    from: ctx.accounts.sol_vault.to_account_info(),
-                    to: ctx.accounts.beneficiary.to_account_info(),
+                    from: ctx.accounts.associated_token_account.to_account_info(),
+                    authority: escrow_vault.to_account_info(),
                 },
                 signer,
             ),
             shares,
         )?;
+
+        // Tranfer sol: sol_vault -> beneficiary
+        let sol_vault = &mut ctx.accounts.sol_vault.to_account_info();
+        let beneficiary = &mut ctx.accounts.beneficiary.to_account_info();
+
+        **sol_vault.try_borrow_mut_lamports()? -= shares;
+        **beneficiary.try_borrow_mut_lamports()? += shares;
 
         escrow_vault.shares = 0;
         escrow_vault.status = VaultStatus::Finished;
@@ -223,6 +229,9 @@ pub struct EscrowVault {
     pub bump: u8,
 }
 
+#[account]
+pub struct SolVault {}
+
 #[derive(Accounts)]
 pub struct InitializeGlobalState<'info> {
     #[account(mut)]
@@ -232,7 +241,7 @@ pub struct InitializeGlobalState<'info> {
     pub global_state: Account<'info, GlobalState>,
 
     #[account(init, payer = payer, space = 8, seeds = [b"sol_vault"], bump)]
-    pub sol_vault: UncheckedAccount<'info>,
+    pub sol_vault: Account<'info, SolVault>,
 
     #[account(init, payer = payer, mint::decimals = 9,  mint::authority = global_state)]
     pub token_mint: Account<'info, Mint>,
@@ -259,20 +268,20 @@ pub struct DepositSol<'info> {
     #[account(mut)]
     pub owner: Signer<'info>,
 
-    #[account(mut, seeds = [b"global_state"], bump, has_one = token_mint)]
+    #[account(mut, seeds = [b"global_state"], bump)]
     pub global_state: Account<'info, GlobalState>,
 
     #[account(mut, seeds = [b"escrow_vault", owner.key().as_ref()], bump)]
     pub escrow_vault: Account<'info, EscrowVault>,
 
     #[account(mut, seeds = [b"sol_vault"], bump)]
-    pub sol_vault: UncheckedAccount<'info>,
+    pub sol_vault: Account<'info, SolVault>,
 
-    #[account(mut)]
+    #[account(mut, address = global_state.token_mint)]
     pub token_mint: Account<'info, Mint>,
 
-    #[account(mut, associated_token::authority = owner, associated_token::mint = token_mint)]
-    pub token_account: Account<'info, TokenAccount>,
+    #[account(init_if_needed, payer = owner, associated_token::authority = owner, associated_token::mint = token_mint)]
+    pub associated_token_account: Account<'info, TokenAccount>,
 
     pub associated_token_program: Program<'info, AssociatedToken>,
     pub system_program: Program<'info, System>,
@@ -293,17 +302,17 @@ pub struct RedeemToken<'info> {
     #[account(mut)]
     pub owner: Signer<'info>,
 
-    #[account(mut, seeds = [b"global_state"], bump, has_one = token_mint)]
+    #[account(mut, seeds = [b"global_state"], bump)]
     pub global_state: Account<'info, GlobalState>,
 
     #[account(mut, seeds = [b"sol_vault"], bump, address = global_state.sol_vault)]
-    pub sol_vault: UncheckedAccount<'info>,
+    pub sol_vault: Account<'info, SolVault>,
 
-    #[account(mut)]
+    #[account(mut, address = global_state.token_mint)]
     pub token_mint: Account<'info, Mint>,
 
     #[account(mut, associated_token::authority = owner, associated_token::mint = token_mint)]
-    pub token_account: Account<'info, TokenAccount>,
+    pub associated_token_account: Account<'info, TokenAccount>,
 
     pub associated_token_program: Program<'info, AssociatedToken>,
     pub system_program: Program<'info, System>,
@@ -313,22 +322,24 @@ pub struct RedeemToken<'info> {
 #[derive(Accounts)]
 pub struct ClaimInheritaince<'info> {
     #[account(mut)]
-    pub beneficiary: Signer<'info>,
     pub escrow_owner: SystemAccount<'info>,
 
-    #[account(mut, seeds = [b"escrow_vault", escrow_owner.key().as_ref()], bump, has_one = beneficiary)]
+    #[account(mut, seeds = [b"escrow_vault", escrow_owner.key().as_ref()], bump)]
     pub escrow_vault: Account<'info, EscrowVault>,
 
-    #[account(mut, seeds = [b"global_state"], bump, has_one = token_mint)]
+    #[account(mut, address = escrow_vault.beneficiary)]
+    pub beneficiary: Signer<'info>,
+
+    #[account(mut, seeds = [b"global_state"], bump)]
     pub global_state: Account<'info, GlobalState>,
 
     #[account(mut, seeds = [b"sol_vault"], bump, address = global_state.sol_vault)]
-    pub sol_vault: UncheckedAccount<'info>,
+    pub sol_vault: Account<'info, SolVault>,
 
     #[account(mut, associated_token::authority = escrow_owner, associated_token::mint = token_mint)]
-    pub token_account: Account<'info, TokenAccount>,
+    pub associated_token_account: Account<'info, TokenAccount>,
 
-    #[account(mut)]
+    #[account(mut, address = global_state.token_mint)]
     pub token_mint: Account<'info, Mint>,
 
     pub associated_token_program: Program<'info, AssociatedToken>,
