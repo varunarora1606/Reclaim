@@ -4,7 +4,7 @@ use anchor_spl::{
     token::{Mint, Token, TokenAccount},
 };
 
-declare_id!("D6KsfpptWHAWd6YUSeCMokhk2ESGxMPbP2qjGF7F7HE");
+declare_id!("FhgJrDJK1V2MDPLHmfyPeZaHxN7HQQ3GMJs8tfzHo5cr");
 
 #[program]
 pub mod reclaim {
@@ -15,6 +15,11 @@ pub mod reclaim {
     use super::*;
 
     pub fn initialize_global_state(ctx: Context<InitializeGlobalState>) -> Result<()> {
+        require!(
+            ctx.accounts.global_state.token_mint == Pubkey::default(),
+            ErrorCode::ProgramAlreadyInitialized
+        );
+
         let global_state = &mut ctx.accounts.global_state;
         global_state.token_mint = ctx.accounts.token_mint.key();
         global_state.sol_vault = ctx.accounts.sol_vault.key();
@@ -25,6 +30,10 @@ pub mod reclaim {
 
     pub fn create_escrow(ctx: Context<CreateEscrow>, inactivity_period: i64) -> Result<()> {
         require!(inactivity_period > 0, ErrorCode::InvalidInactivityPeriod);
+        require!(
+            ctx.accounts.escrow_vault.owner == Pubkey::default(),
+            ErrorCode::EscrowAlreadyExists
+        );
 
         let clock = Clock::get()?;
         let escrow = &mut ctx.accounts.escrow_vault;
@@ -38,8 +47,8 @@ pub mod reclaim {
         Ok(())
     }
 
-    pub fn deposite_sol(ctx: Context<DepositSol>, shares: u64) -> Result<()> {
-        // require!(shares > 0, ErrorCode::InvalidAmount);
+    pub fn deposit_sol(ctx: Context<DepositSol>, shares: u64) -> Result<()> {
+        require!(shares > 0, ErrorCode::InvalidAmount);
 
         let escrow = &mut ctx.accounts.escrow_vault;
         let global = &mut ctx.accounts.global_state;
@@ -238,13 +247,13 @@ pub struct InitializeGlobalState<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
 
-    #[account(init, payer = payer, space = 8 + 32 + 32 + 8 + 1, seeds = [b"global_state"], bump)]
+    #[account(init_if_needed, payer = payer, space = 8 + 32 + 32 + 8 + 1, seeds = [b"global_state"], bump)]
     pub global_state: Account<'info, GlobalState>,
 
-    #[account(init, payer = payer, space = 8, seeds = [b"sol_vault"], bump)]
+    #[account(init_if_needed, payer = payer, space = 8, seeds = [b"sol_vault"], bump)]
     pub sol_vault: Account<'info, SolVault>,
 
-    #[account(init, payer = payer, mint::decimals = 9,  mint::authority = global_state)]
+    #[account(init_if_needed, payer = payer, mint::decimals = 9,  mint::authority = global_state)]
     pub token_mint: Account<'info, Mint>,
 
     pub system_program: Program<'info, System>,
@@ -256,7 +265,7 @@ pub struct CreateEscrow<'info> {
     #[account(mut)]
     pub owner: Signer<'info>,
 
-    #[account(init, payer = owner, space = 8 + 32 + 32 + 8 + 8 + 8 + 1 +1 , seeds = [b"escrow_vault", owner.key().as_ref()], bump)]
+    #[account(init_if_needed, payer = owner, space = 8 + 32 + 32 + 8 + 8 + 8 + 1 +1 , seeds = [b"escrow_vault", owner.key().as_ref()], bump)]
     pub escrow_vault: Account<'info, EscrowVault>,
 
     pub beneficiary: SystemAccount<'info>,
@@ -357,6 +366,9 @@ pub enum VaultStatus {
 
 #[error_code]
 pub enum ErrorCode {
+    #[msg("Program already initialized")]
+    ProgramAlreadyInitialized,
+
     #[msg("Invalid Amount")]
     InvalidAmount,
 
@@ -381,6 +393,9 @@ pub enum ErrorCode {
 
     #[msg("Invalid beneficiary")]
     InvalidBeneficiary,
+
+    #[msg("Escrow already exists")]
+    EscrowAlreadyExists,
 
     // ───────────── Deposits ─────────────
     #[msg("Deposit amount must be greater than zero")]

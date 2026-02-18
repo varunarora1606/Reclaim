@@ -6,13 +6,15 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-reclaim = "D6KsfpptWHAWd6YUSeCMokhk2ESGxMPbP2qjGF7F7HE"
+reclaim = "FhgJrDJK1V2MDPLHmfyPeZaHxN7HQQ3GMJs8tfzHo5cr"
+[programs.devnet]
+reclaim = "FhgJrDJK1V2MDPLHmfyPeZaHxN7HQQ3GMJs8tfzHo5cr"
 
 [registry]
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "localnet"
+cluster = "devnet"
 wallet = "~/.config/solana/id.json"
 
 [scripts]

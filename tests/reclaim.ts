@@ -94,7 +94,7 @@ describe("reclaim", () => {
   it("Is sol deposited!", async () => {
     await sleep(2000);
     const tx = await program.methods
-      .depositeSol(new BN(5 * LAMPORTS_PER_SOL))
+      .depositSol(new BN(5 * LAMPORTS_PER_SOL))
       .accounts({
         owner: escrowOwner.publicKey,
         tokenMint: tokenMint.publicKey,
